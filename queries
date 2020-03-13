@@ -1,0 +1,202 @@
+function roadQuality(startTimestamp, endTimestamp, mine) {
+    return `
+    WITH
+      raw AS (
+          SELECT
+            ROAD_SEGMENT,
+            START_TIMESTAMP,
+            MEAN_SUSPENSION_PRESSURE,
+            ROAD_QUALITY_PERCENT,
+            MAX_SUSPENSION_PRESSURE,
+            MIN_SUSPENSION_PRESSURE,
+            DELTA_SUSPENSION_PRESSURE,
+            TARGET_SUSPENSION_PRESSURE,
+            POTENTIAL_SHIFT_GAINS_BCM,
+            TRUCK_DATA_COUNT,
+            CYCLE_DATA_COUNT,
+            END_TIMESTAMP,
+            ROAD_NETWORK_META_ORIGIN,
+            DATA_POINTS_COUNT,
+            MAX_SEGMENT_TIMESTAMP,
+            ROW_NUMBER() OVER(PARTITION BY CAST(ROAD_SEGMENT AS STRING) ORDER BY END_TIMESTAMP DESC) AS NUM
+          FROM \`teck-dev-adv-haul-analytics.AHA_PUBLISHED_${mine}_STAGE.ROAD_QUALITY\`
+          WHERE
+            START_TIMESTAMP > '${startTimestamp}'  -- Ex.: '2019-12-21 13:30:00 UTC'
+            AND END_TIMESTAMP <= '${endTimestamp}' -- Ex.: '2019-12-31 13:30:00 UTC'
+      ),
+      aggregated AS (
+          SELECT
+          ROAD_SEGMENT,
+          ARRAY_AGG(STRUCT(END_TIMESTAMP AS entry_time,
+              MEAN_SUSPENSION_PRESSURE AS mean_suspension_pressure,
+              DATA_POINTS_COUNT AS data_points,
+              TRUCK_DATA_COUNT as truck_data_count,
+              CYCLE_DATA_COUNT as cycle_data_count)) AS SEGMENT_DATA
+          FROM
+            raw
+          GROUP BY
+            ROAD_SEGMENT
+      ),
+      road_quality AS (
+          SELECT
+            raw.ROAD_SEGMENT,
+            agg.SEGMENT_DATA,
+            ROAD_QUALITY_PERCENT,
+            TARGET_SUSPENSION_PRESSURE,
+            MEAN_SUSPENSION_PRESSURE,
+            MAX_SUSPENSION_PRESSURE,
+            MIN_SUSPENSION_PRESSURE,
+            POTENTIAL_SHIFT_GAINS_BCM,
+            START_TIMESTAMP,
+            END_TIMESTAMP,
+            ROAD_NETWORK_META_ORIGIN
+          FROM
+            raw
+          INNER JOIN
+            aggregated AS agg
+          ON
+            raw.ROAD_SEGMENT = agg.ROAD_SEGMENT
+          WHERE
+            NUM = 1
+      ),
+      road_quality_agg as (
+        SELECT
+          "road_quality" AS TYPE,
+          ROAD_SEGMENT AS ID,
+          MEAN_SUSPENSION_PRESSURE AS VALUE,
+          TO_JSON_STRING(STRUCT(SEGMENT_DATA AS segment_data,
+              TARGET_SUSPENSION_PRESSURE AS target_suspension_pressure,
+              MEAN_SUSPENSION_PRESSURE AS mean_suspension_pressure,
+              MAX_SUSPENSION_PRESSURE AS max_suspension_pressure,
+              MIN_SUSPENSION_PRESSURE AS min_suspension_pressure,
+              ROAD_QUALITY_PERCENT AS road_quality_percent,
+              POTENTIAL_SHIFT_GAINS_BCM AS potential_shift_gains_bcm,
+              START_TIMESTAMP AS period_start,
+              END_TIMESTAMP AS period_end)) AS PAYLOAD,
+              ROAD_NETWORK_META_ORIGIN AS meta_origin
+        FROM road_quality
+      )
+
+
+        SELECT * FROM road_quality_agg
+        WHERE
+            id IS NOT NULL
+            AND
+                (
+                    TYPE = 'road_quality'
+                    AND
+                        CAST (json_extract_scalar(payload, '$.period_end') AS TIMESTAMP) >= timestamp_sub(CURRENT_TIMESTAMP ()
+                        , INTERVAL 50 MINUTE)
+                    AND
+                        CAST (json_extract_scalar(payload, '$.period_end') AS TIMESTAMP) = (
+                            SELECT
+                            MAX(CAST (json_extract_scalar(payload, '$.period_end') AS TIMESTAMP))
+                            FROM
+                            road_quality_agg
+                            WHERE type = 'road_quality'
+                        )
+                )
+    `
+}
+
+function truckLaunchSpeed(startTimestamp, endTimestamp, mine) {
+    return `
+    WITH
+    raw AS (
+        SELECT
+            LOAD_UNIT,
+            TARGET_SPEED,
+            ZONE,
+            MEAN_LAUNCH_SPEED,
+            MIN_LAUNCH_SPEED,
+            MAX_LAUNCH_SPEED,
+            POTENTIAL_SHIFT_GAINS_BCM,
+            TRUCK_DATA_COUNT,
+            CYCLE_DATA_COUNT,
+            LOAD_LATITUDE_LAST,
+            LOAD_LONGITUDE_LAST,
+            START_TIMESTAMP,
+            END_TIMESTAMP,
+            MAX_SEGMENT_TIMESTAMP,
+            ROW_NUMBER() OVER(PARTITION BY LOAD_UNIT ORDER BY END_TIMESTAMP DESC) AS NUM
+        FROM \`teck-dev-adv-haul-analytics.AHA_PUBLISHED_${mine}_STAGE.TRUCK_LAUNCH_SPEED\`
+        WHERE
+            START_TIMESTAMP > '${startTimestamp}'  -- Ex.: '2019-12-21 13:30:00 UTC'
+            AND END_TIMESTAMP <= '${endTimestamp}'  -- Ex.: '2019-12-31 13:30:00 UTC'
+    ),
+    aggregated AS (
+        SELECT
+          LOAD_UNIT,
+          ARRAY_AGG(STRUCT(END_TIMESTAMP AS entry_time,
+              MEAN_LAUNCH_SPEED AS mean_launch_speed,
+              TRUCK_DATA_COUNT as truck_data_count,
+              CYCLE_DATA_COUNT as cycle_data_count)) AS SHOVEL_DATA
+        FROM
+          raw
+        GROUP BY
+          LOAD_UNIT
+    ),
+    truck_launch_speed AS (
+        SELECT
+          raw.LOAD_UNIT,
+          agg.SHOVEL_DATA,
+          TARGET_SPEED,
+          ZONE,
+          MEAN_LAUNCH_SPEED,
+          MIN_LAUNCH_SPEED,
+          MAX_LAUNCH_SPEED,
+          POTENTIAL_SHIFT_GAINS_BCM,
+          LOAD_LONGITUDE_LAST,
+          LOAD_LATITUDE_LAST,
+          START_TIMESTAMP,
+          END_TIMESTAMP
+        FROM
+          raw
+        INNER JOIN
+          aggregated agg
+        ON
+          raw.LOAD_UNIT = agg.LOAD_UNIT
+        WHERE
+          NUM = 1
+  ),
+  truck_launch_speed_agg as (
+    SELECT
+      "truck_launch_speed" AS TYPE,
+      LOAD_UNIT AS ID,
+      MEAN_LAUNCH_SPEED AS VALUE,
+      TO_JSON_STRING(STRUCT(SHOVEL_DATA AS shovel_data,
+          TARGET_SPEED AS target_speed,
+          ZONE AS zone,
+          MEAN_LAUNCH_SPEED AS mean_launch_speed,
+          MIN_LAUNCH_SPEED AS min_launch_speed,
+          MAX_LAUNCH_SPEED AS max_launch_speed,
+          LOAD_LATITUDE_LAST AS load_unit_lat,
+          LOAD_LONGITUDE_LAST AS load_unit_lon,
+          START_TIMESTAMP AS period_start,
+          END_TIMESTAMP AS period_end,
+          POTENTIAL_SHIFT_GAINS_BCM AS potential_shift_gains_bcm)) AS PAYLOAD
+    FROM
+      truck_launch_speed
+  )
+
+ SELECT * FROM truck_launch_speed_agg
+  WHERE
+    ID IS NOT NULL
+    AND
+      (
+          TYPE = 'truck_launch_speed'
+          AND
+              CAST (json_extract_scalar(payload, '$.period_end') AS TIMESTAMP) >= timestamp_sub(CURRENT_TIMESTAMP ()
+              , INTERVAL 90 MINUTE)
+          AND
+              CAST (json_extract_scalar(payload, '$.period_end') AS TIMESTAMP) = (
+                  SELECT
+                  MAX(CAST (json_extract_scalar(payload, '$.period_end') AS TIMESTAMP))
+                  FROM truck_launch_speed_agg
+                  WHERE type = 'truck_launch_speed'
+              )
+       )
+    `;
+}
+
+module.exports = { roadQuality, truckLaunchSpeed };
